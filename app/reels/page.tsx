@@ -7,10 +7,10 @@ export default async function ReelsPage() {
   const sb = createServiceClient();
   const { data, error } = await sb
     .from("youtube_candidates")
-    .select("id, video_id, title, channel, era, stars, thumbnail_url, views, like_rate, duration_sec")
-    .eq("status", "reserved")
-    .order("stars", { ascending: false })
-    .limit(50);
+    .select("id, video_id, title, channel, era, stars, thumbnail_url, views, like_rate, duration_sec, final_score")
+    .eq("status", "pending")
+    .order("final_score", { ascending: false })
+    .limit(10);
 
   if (error) {
     return (

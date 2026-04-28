@@ -1,20 +1,20 @@
 "use server";
 
 import Anthropic from "@anthropic-ai/sdk";
+import { createServiceClient } from "@/lib/supabase";
+import { revalidatePath } from "next/cache";
+import type { Json } from "@/lib/database.types";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const CHANNEL_CONTEXT = `
-채널: @dawn.town.music
-슬로건: "22세기 라디오"
-채널 감성: 새벽, 그리움, 감성, 올드팝, 발라드
-타겟: 감성적인 음악을 즐기는 2030대
-금지: 아이돌 그룹, 댄스팝 언급 금지
-`;
-
 export interface CarouselSlide {
   slideNumber: number;
-  text: string;
+  songTitle: string;
+  artist: string;
+  keywords: string[];
+  oneLiner: string;
+  imageUrl?: string | null;
+  isCTA?: boolean;
 }
 
 export interface CarouselResult {
@@ -24,49 +24,93 @@ export interface CarouselResult {
 }
 
 export async function generateCarouselContent(
-  title: string,
-  channel: string,
-  era: string,
-  stars: number,
+  theme: string,
   slideCount: number,
 ): Promise<CarouselResult> {
+  const songCount = slideCount - 1;
+
   const prompt = `당신은 인스타그램 캐러셀 콘텐츠 크리에이터입니다.
-${CHANNEL_CONTEXT}
 
-아래 YouTube 영상을 기반으로 인스타그램 캐러셀 슬라이드 문구를 작성해주세요.
+채널: @dawn.town.music ("22세기 라디오")
+감성: 새벽, 그리움, 위로, 올드팝/발라드
+타겟: 음악에 감성적인 2030대
+금지: 아이돌, 댄스팝 언급 없이
 
-영상 정보:
-- 제목: ${title}
-- 아티스트/채널: ${channel}
-- 시대: ${era === "classic" ? "클래식 (올드팝)" : "모던"}
-- 별점: ${stars.toFixed(1)}/5.0
-- 슬라이드 수: ${slideCount}장
+주제: "${theme}"
 
-요구사항:
-1. 각 슬라이드: 짧고 강렬한 1~2줄 문구. 새벽 감성, 그리움, 위로.
-2. 슬라이드 흐름: 도입 → 공감 → 절정 → (마무리/CTA)
-3. 전체 캡션: 3~4줄, 이모지 1~2개
-4. 해시태그: 10~15개
+이 주제에 어울리는 곡 ${songCount}개를 선정하고, 각 슬라이드 문구를 작성해주세요.
+마지막 ${slideCount}번째 슬라이드는 CTA(팔로우 유도) 슬라이드입니다.
 
-출력 형식 (JSON):
+각 곡 슬라이드:
+- songTitle: 곡 제목
+- artist: 아티스트명
+- keywords: 감성 키워드 2~3개 (예: ["새벽", "그리움", "위로"])
+- oneLiner: 채널 감성에 맞는 한 줄 소개 (20~35자, 따뜻하고 감성적으로)
+
+CTA 슬라이드 (마지막):
+- songTitle: "더 많은 감성 음악"
+- artist: "@dawn.town.music"
+- keywords: ["22세기 라디오", "팔로우"]
+- oneLiner: "오늘 밤도 함께해요 🌙"
+
+전체 캡션 (3~5줄, 이모지 1~2개, 주제 감성 살리기)과 해시태그 10~15개 (#22세기라디오 필수).
+
+JSON만 출력:
 {
   "slides": [
-    { "slideNumber": 1, "text": "슬라이드 1 문구" },
-    { "slideNumber": 2, "text": "슬라이드 2 문구" }
+    { "slideNumber": 1, "songTitle": "...", "artist": "...", "keywords": ["..."], "oneLiner": "..." },
+    { "slideNumber": ${slideCount}, "songTitle": "...", "artist": "...", "keywords": ["..."], "oneLiner": "...", "isCTA": true }
   ],
-  "caption": "전체 캡션",
-  "hashtags": "#태그1 #태그2 ..."
+  "caption": "...",
+  "hashtags": "..."
 }`;
 
   const response = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 800,
+    max_tokens: 1500,
     messages: [{ role: "user", content: prompt }],
   });
 
   const text = response.content[0].type === "text" ? response.content[0].text : "";
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("Claude 응답 파싱 실패");
-
   return JSON.parse(jsonMatch[0]) as CarouselResult;
+}
+
+export async function reserveCarousel(data: {
+  theme: string;
+  slides: CarouselSlide[];
+  caption: string;
+  hashtags: string;
+  scheduledAt: string | null;
+}): Promise<void> {
+  const sb = createServiceClient();
+  const { error } = await sb.from("carousel_posts").insert({
+    theme: data.theme,
+    slides: data.slides as unknown as Json,
+    caption: data.caption,
+    hashtags: data.hashtags,
+    scheduled_at: data.scheduledAt,
+    status: "reserved",
+  });
+  if (error) throw new Error(error.message);
+  revalidatePath("/pending");
+  revalidatePath("/carousel");
+}
+
+export async function cancelCarousel(id: string): Promise<void> {
+  const sb = createServiceClient();
+  const { error } = await sb.from("carousel_posts").delete().eq("id", id);
+  if (error) throw new Error("캐러셀 예약 취소 실패: " + error.message);
+  revalidatePath("/pending");
+}
+
+export async function markCarouselUploaded(id: string): Promise<void> {
+  const sb = createServiceClient();
+  const { error } = await sb
+    .from("carousel_posts")
+    .update({ status: "uploaded" })
+    .eq("id", id);
+  if (error) throw new Error("업로드 완료 처리 실패: " + error.message);
+  revalidatePath("/pending");
 }

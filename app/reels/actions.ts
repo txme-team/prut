@@ -1,6 +1,8 @@
 "use server";
 
 import Anthropic from "@anthropic-ai/sdk";
+import { createServiceClient } from "@/lib/supabase";
+import { revalidatePath } from "next/cache";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -57,4 +59,23 @@ JSON만 출력:
   if (!jsonMatch) throw new Error("Claude 응답 파싱 실패");
   const parsed = JSON.parse(jsonMatch[0]) as { versions: ReelsVersion[] };
   return parsed.versions;
+}
+
+export async function reserveFromReels(
+  candidateId: string,
+  videoId: string,
+  videoFileUrl: string | null,
+): Promise<void> {
+  const sb = createServiceClient();
+  const { error } = await sb
+    .from("youtube_candidates")
+    .update({ status: "reserved", video_file_url: videoFileUrl })
+    .eq("id", candidateId);
+  if (error) throw new Error(error.message);
+
+  await sb.from("seen_videos").upsert({ video_id: videoId }, { onConflict: "video_id" });
+
+  revalidatePath("/reels");
+  revalidatePath("/queue");
+  revalidatePath("/pending");
 }

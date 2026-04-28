@@ -1,8 +1,8 @@
 "use client";
 
 import { useTransition } from "react";
-import { ExternalLink, RotateCcw } from "lucide-react";
-import { cancelReservation } from "@/app/pending/actions";
+import { ExternalLink, RotateCcw, Check } from "lucide-react";
+import { cancelReservation, markReelsUploaded } from "@/app/pending/actions";
 import type { Database } from "@/lib/database.types";
 
 type Candidate = Database["public"]["Tables"]["youtube_candidates"]["Row"];
@@ -29,6 +29,11 @@ export function PendingCard({ candidate: c, index }: Props) {
   function handleCancel(e: React.MouseEvent) {
     e.stopPropagation();
     startTransition(() => cancelReservation(c.id));
+  }
+
+  function handleUploaded(e: React.MouseEvent) {
+    e.stopPropagation();
+    startTransition(() => markReelsUploaded(c.id));
   }
 
   return (
@@ -109,6 +114,15 @@ export function PendingCard({ candidate: c, index }: Props) {
         >
           YouTube <ExternalLink size={11} />
         </a>
+        <button
+          onClick={handleUploaded}
+          disabled={isPending}
+          className="flex items-center gap-1 text-[11px] font-semibold px-[10px] py-[6px] rounded-[7px]"
+          style={{ background: "rgba(76,175,130,.15)", color: "var(--green)", border: "1px solid rgba(76,175,130,.3)" }}
+        >
+          <Check size={11} />
+          업로드 완료
+        </button>
         <button
           onClick={handleCancel}
           disabled={isPending}

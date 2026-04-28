@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { ExternalLink, RotateCcw, Sparkles, Copy, Check, X } from "lucide-react";
-import { generateReelsContent, type ReelsVersion } from "@/app/reels/actions";
+import { useState, useTransition, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { ExternalLink, RotateCcw, Sparkles, Copy, Check, X, Upload, Film } from "lucide-react";
+import { generateReelsContent, reserveFromReels, type ReelsVersion } from "@/app/reels/actions";
+import { supabase } from "@/lib/supabase";
 
 interface Candidate {
   id: string;
@@ -15,6 +17,7 @@ interface Candidate {
   views: number;
   like_rate: number;
   duration_sec: number;
+  final_score: number;
 }
 
 interface EditState {
@@ -23,6 +26,14 @@ interface EditState {
   hashtags: string;
   date: string;
   time: string;
+}
+
+interface UploadState {
+  file: File;
+  progress: number;
+  status: "uploading" | "done" | "error";
+  url: string | null;
+  error: string | null;
 }
 
 function formatViews(v: number) {
@@ -34,6 +45,12 @@ function formatDuration(sec: number) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / 1024).toFixed(0) + " KB";
 }
 
 function toStars(n: number) {
@@ -78,10 +95,10 @@ const COL_FOOTER: React.CSSProperties = {
   flexShrink: 0,
 };
 
-function ColLabel({ num, label, color = "var(--blue)" }: { num: string; label: string; color?: string }) {
+function ColLabel({ num, label }: { num: string; label: string }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontSize: 11, fontWeight: 700, color, letterSpacing: ".5px" }}>{num}</span>
+      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--blue)", letterSpacing: ".5px" }}>{num}</span>
       <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".5px", color: "var(--text-muted)" }}>
         {label}
       </span>
@@ -116,6 +133,7 @@ interface Props {
 }
 
 export function ReelsWorkflow({ candidates }: Props) {
+  const router = useRouter();
   const [selectedId, setSelectedId] = useState<string | null>(candidates[0]?.id ?? null);
   const [versions, setVersions] = useState<ReelsVersion[]>([]);
   const [selectedVersionIdx, setSelectedVersionIdx] = useState<number | null>(null);
@@ -123,9 +141,13 @@ export function ReelsWorkflow({ candidates }: Props) {
   const [isPending, startTransition] = useTransition();
   const [regenIdx, setRegenIdx] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isReserving, setIsReserving] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [showToast, setShowToast] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [uploadState, setUploadState] = useState<UploadState | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const selected = candidates.find(c => c.id === selectedId) ?? null;
   const dt = defaultDateTime();
@@ -190,10 +212,79 @@ export function ReelsWorkflow({ candidates }: Props) {
     });
   }
 
-  function handleReserve() {
-    setShowModal(false);
-    setShowToast(true);
-    setTimeout(() => setShowToast(false), 3500);
+  const uploadFile = useCallback(async (file: File) => {
+    const ACCEPTED = ["video/mp4", "video/quicktime", "video/x-msvideo", "video/webm", "video/mov"];
+    if (!ACCEPTED.includes(file.type) && !file.name.match(/\.(mp4|mov|avi|webm|m4v)$/i)) {
+      setUploadState({ file, progress: 0, status: "error", url: null, error: "지원하지 않는 파일 형식입니다 (mp4, mov, avi, webm)" });
+      return;
+    }
+    if (file.size > 500 * 1024 * 1024) {
+      setUploadState({ file, progress: 0, status: "error", url: null, error: "파일 크기는 500MB 이하여야 합니다" });
+      return;
+    }
+
+    const ext = file.name.split(".").pop() ?? "mp4";
+    const path = `${selectedId ?? "unknown"}/${Date.now()}.${ext}`;
+
+    setUploadState({ file, progress: 0, status: "uploading", url: null, error: null });
+
+    const { error: uploadError } = await supabase.storage
+      .from("reels")
+      .upload(path, file, {
+        cacheControl: "3600",
+        upsert: true,
+      });
+
+    if (uploadError) {
+      setUploadState(prev => prev ? { ...prev, status: "error", error: uploadError.message } : null);
+      return;
+    }
+
+    const { data: urlData } = supabase.storage.from("reels").getPublicUrl(path);
+    setUploadState(prev => prev ? { ...prev, progress: 100, status: "done", url: urlData.publicUrl } : null);
+  }, [selectedId]);
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) uploadFile(file);
+  }
+
+  function handleDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragOver(true);
+  }
+
+  function handleDragLeave() {
+    setIsDragOver(false);
+  }
+
+  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) uploadFile(file);
+  }
+
+  async function handleReserve() {
+    if (!selected) return;
+    setIsReserving(true);
+    try {
+      await reserveFromReels(selected.id, selected.video_id, uploadState?.url ?? null);
+      setShowModal(false);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3500);
+      router.refresh();
+      setSelectedId(null);
+      setVersions([]);
+      setSelectedVersionIdx(null);
+      setEditState(null);
+      setUploadState(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "예약 실패");
+      setShowModal(false);
+    } finally {
+      setIsReserving(false);
+    }
   }
 
   function copy(text: string, key: string) {
@@ -212,13 +303,13 @@ export function ReelsWorkflow({ candidates }: Props) {
         <div style={COL_HEADER}>
           <ColLabel num="01" label="영상 선택" />
           <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
-            예약 확정 영상 {candidates.length}개
+            채널 적합 영상 Top {candidates.length}
           </p>
         </div>
 
         <div style={COL_BODY}>
           {candidates.length === 0 ? (
-            <EmptyState icon="🎬" text={"YouTube 큐에서 영상을\n예약 확정하면 여기에 표시됩니다"} />
+            <EmptyState icon="🎬" text={"채널 적합 영상이 없습니다\nYouTube 큐에서 영상을 추가해주세요"} />
           ) : (
             candidates.map(c => {
               const isSel = c.id === selectedId;
@@ -235,12 +326,14 @@ export function ReelsWorkflow({ candidates }: Props) {
                     transition: "border-color .15s",
                   }}
                 >
-                  {c.thumbnail_url ? (
-                    <img src={c.thumbnail_url} alt={c.title}
-                      style={{ width: "100%", aspectRatio: "16/9", objectFit: "cover", display: "block" }} />
-                  ) : (
-                    <div style={{ width: "100%", aspectRatio: "16/9", background: "var(--surface3)" }} />
-                  )}
+                  <div style={{ width: "100%", paddingTop: "56.25%", position: "relative", overflow: "hidden" }}>
+                    {c.thumbnail_url ? (
+                      <img src={c.thumbnail_url} alt={c.title}
+                        style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                    ) : (
+                      <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "var(--surface3)" }} />
+                    )}
+                  </div>
                   <div style={{ padding: 8 }}>
                     <p style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.4, marginBottom: 5, color: "var(--text)" }}>
                       {c.title}
@@ -373,6 +466,7 @@ export function ReelsWorkflow({ candidates }: Props) {
             <EmptyState icon="📋" text={"생성된 콘텐츠를 선택하면\n여기서 편집할 수 있습니다"} />
           ) : (
             <>
+              {/* 텍스트 필드들 */}
               {(["thumbnailTitle", "caption", "hashtags"] as const).map(key => {
                 const labels: Record<string, string> = {
                   thumbnailTitle: "썸네일 타이틀",
@@ -417,6 +511,7 @@ export function ReelsWorkflow({ candidates }: Props) {
                 );
               })}
 
+              {/* YouTube 원본 링크 */}
               {selected && (
                 <a
                   href={`https://www.youtube.com/watch?v=${selected.video_id}`}
@@ -432,6 +527,120 @@ export function ReelsWorkflow({ candidates }: Props) {
                 </a>
               )}
 
+              {/* 영상 파일 업로드 */}
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: ".5px" }}>
+                    릴스 영상 파일
+                  </span>
+                  {uploadState?.status === "done" && (
+                    <button
+                      onClick={() => { setUploadState(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                      style={{ display: "flex", alignItems: "center", gap: 3, background: "none", border: "none", cursor: "pointer", fontSize: 10, color: "var(--text-dim)" }}
+                    >
+                      <X size={10} /> 제거
+                    </button>
+                  )}
+                </div>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/x-msvideo,video/webm,.mp4,.mov,.avi,.webm,.m4v"
+                  onChange={handleFileInput}
+                  style={{ display: "none" }}
+                />
+
+                {/* 업로드 완료 상태 */}
+                {uploadState?.status === "done" ? (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 10,
+                    background: "rgba(76,175,130,.08)", border: "1px solid rgba(76,175,130,.3)",
+                    borderRadius: 8, padding: "10px 12px",
+                  }}>
+                    <div style={{ width: 32, height: 32, borderRadius: 6, background: "rgba(76,175,130,.15)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Film size={16} style={{ color: "var(--green)" } as React.CSSProperties} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {uploadState.file.name}
+                      </p>
+                      <p style={{ fontSize: 10, color: "var(--green)", marginTop: 2 }}>
+                        업로드 완료 · {formatBytes(uploadState.file.size)}
+                      </p>
+                    </div>
+                    <Check size={14} style={{ color: "var(--green)", flexShrink: 0 } as React.CSSProperties} />
+                  </div>
+                ) : uploadState?.status === "uploading" ? (
+                  /* 업로드 중 */
+                  <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                      <Film size={14} style={{ color: "var(--text-muted)", flexShrink: 0 } as React.CSSProperties} />
+                      <p style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {uploadState.file.name}
+                      </p>
+                    </div>
+                    <div style={{ height: 3, background: "var(--surface3)", borderRadius: 2, overflow: "hidden" }}>
+                      <div className="upload-progress-bar" style={{ height: "100%", background: "var(--accent)", borderRadius: 2 }} />
+                    </div>
+                    <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 6 }}>업로드 중...</p>
+                  </div>
+                ) : uploadState?.status === "error" ? (
+                  /* 에러 상태 */
+                  <div>
+                    <div style={{ background: "rgba(224,92,92,.08)", border: "1px solid rgba(224,92,92,.3)", borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                      <p style={{ fontSize: 12, color: "var(--red)" }}>{uploadState.error}</p>
+                    </div>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{
+                        width: "100%", background: "var(--surface2)", border: "1px dashed var(--border)",
+                        borderRadius: 8, padding: "9px 0", fontSize: 12, color: "var(--text-muted)", cursor: "pointer",
+                      }}
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                ) : (
+                  /* 드롭존 */
+                  <div
+                    onDrop={handleDrop}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{
+                      border: `2px dashed ${isDragOver ? "var(--accent)" : "var(--border)"}`,
+                      borderRadius: 10,
+                      padding: "24px 16px",
+                      textAlign: "center",
+                      cursor: "pointer",
+                      background: isDragOver ? "var(--accent-dim)" : "transparent",
+                      transition: "border-color .15s, background .15s",
+                    }}
+                  >
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 10,
+                      background: isDragOver ? "rgba(200,169,110,.2)" : "var(--surface2)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      margin: "0 auto 10px",
+                      transition: "background .15s",
+                    }}>
+                      <Upload size={18} style={{ color: isDragOver ? "var(--accent)" : "var(--text-muted)" } as React.CSSProperties} />
+                    </div>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: isDragOver ? "var(--accent)" : "var(--text)", marginBottom: 4 }}>
+                      {isDragOver ? "여기에 놓으세요" : "영상 파일을 드래그하거나 클릭"}
+                    </p>
+                    <p style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                      mp4, mov, avi, webm · 최대 500MB
+                    </p>
+                    <p style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4, opacity: 0.7 }}>
+                      선택 사항 — 없어도 예약 가능
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* 업로드 예약 일시 */}
               <div>
                 <p style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: ".5px", marginBottom: 6 }}>
                   업로드 예약 일시
@@ -454,7 +663,13 @@ export function ReelsWorkflow({ candidates }: Props) {
 
               <button
                 onClick={() => setShowModal(true)}
-                style={{ width: "100%", background: "var(--accent)", color: "#1a1400", border: "none", borderRadius: 10, padding: "13px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                disabled={uploadState?.status === "uploading"}
+                style={{
+                  width: "100%", background: "var(--accent)", color: "#1a1400",
+                  border: "none", borderRadius: 10, padding: "13px 0",
+                  fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  opacity: uploadState?.status === "uploading" ? 0.5 : 1,
+                }}
               >
                 업로드 예약
               </button>
@@ -483,6 +698,7 @@ export function ReelsWorkflow({ candidates }: Props) {
                 { label: "영상", val: selected.title },
                 { label: "예약 일시", val: `${editState.date} ${editState.time}` },
                 { label: "해시태그", val: editState.hashtags.trim().split(/\s+/).length + "개" },
+                { label: "영상 파일", val: uploadState?.status === "done" ? `✓ ${uploadState.file.name}` : "첨부 없음" },
               ].map(row => (
                 <div key={row.label} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "2px 0" }}>
                   <span style={{ color: "var(--text-muted)" }}>{row.label}</span>
@@ -501,9 +717,10 @@ export function ReelsWorkflow({ candidates }: Props) {
               </button>
               <button
                 onClick={handleReserve}
-                style={{ flex: 1, background: "var(--accent)", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, color: "#1a1400", cursor: "pointer" }}
+                disabled={isReserving}
+                style={{ flex: 1, background: "var(--accent)", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, color: "#1a1400", cursor: "pointer", opacity: isReserving ? 0.5 : 1 }}
               >
-                예약 확정
+                {isReserving ? "예약 중..." : "예약 확정"}
               </button>
             </div>
           </div>
@@ -542,6 +759,14 @@ export function ReelsWorkflow({ candidates }: Props) {
         @keyframes shimmer {
           0%   { background-position: 200% 0; }
           100% { background-position: -200% 0; }
+        }
+        .upload-progress-bar {
+          animation: upload-fill 1.8s ease-in-out infinite;
+        }
+        @keyframes upload-fill {
+          0%   { width: 15%; }
+          50%  { width: 80%; }
+          100% { width: 95%; }
         }
       `}</style>
     </div>
