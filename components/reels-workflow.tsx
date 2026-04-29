@@ -324,6 +324,7 @@ export function ReelsWorkflow({ candidates }: Props) {
                     overflow: "hidden",
                     cursor: "pointer",
                     transition: "border-color .15s",
+                    flexShrink: 0,
                   }}
                 >
                   <div style={{ width: "100%", paddingTop: "56.25%", position: "relative", overflow: "hidden" }}>
