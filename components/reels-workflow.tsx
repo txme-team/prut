@@ -169,7 +169,7 @@ export function ReelsWorkflow({ candidates }: Props) {
     setEditState(null);
     startTransition(async () => {
       try {
-        const result = await generateReelsContent(selected.title, selected.channel, selected.era);
+        const result = await generateReelsContent(selected.title, selected.channel, selected.era, selected.video_id);
         setVersions(result);
       } catch (e) {
         setError(e instanceof Error ? e.message : "생성 실패");
@@ -194,7 +194,7 @@ export function ReelsWorkflow({ candidates }: Props) {
     setRegenIdx(idx);
     startTransition(async () => {
       try {
-        const result = await generateReelsContent(selected.title, selected.channel, selected.era);
+        const result = await generateReelsContent(selected.title, selected.channel, selected.era, selected.video_id);
         setVersions(prev => {
           const next = [...prev];
           next[idx] = result[idx] ?? result[0];
